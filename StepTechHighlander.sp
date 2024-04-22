@@ -214,8 +214,13 @@ bool isBotOnlyTeam(TFTeam team) {
   return true;
 }
 
+/**
+ * Checks whether the provided client is a bot
+ * 
+ * @return true if the client is a bot, false if it is a player, an invalid client or not connected
+ */
 bool IsBot(int client) {
-  return IsFakeClient(client);
+  return client >= 0 && client <= MaxClients && IsClientConnected(client) && IsFakeClient(client);
 }
 
 int GetClientByName(const char[] name) {
@@ -775,14 +780,20 @@ enum struct ReadyState {
   }
 }
 
-void UpdateTeamComposition(TFTeam team = TFTeam_Unassigned, int playersPerTeam = -1, bool updateBotNames = true) {
+void UpdateTeamComposition(TFTeam team = TFTeam_Unassigned, int playersPerTeam = -1, bool updateBotNames = true, TeamCompUpdateSummary summary = {}) {
   if (playersPerTeam < 0) {
     playersPerTeam = cvarTeamSize.IntValue;
   }
 
   if (team == TFTeam_Unassigned) {
-    UpdateTeamComposition(TFTeam_Blue, playersPerTeam, false);
-    UpdateTeamComposition(TFTeam_Red, playersPerTeam, updateBotNames);
+    UpdateTeamComposition(TFTeam_Blue, playersPerTeam, false, summary);
+    TeamCompUpdateSummary redSummary;
+    UpdateTeamComposition(TFTeam_Red, playersPerTeam, updateBotNames, redSummary);
+    summary.added += redSummary.added;
+    summary.kicked += redSummary.kicked;
+
+    updateBotQuota(playersPerTeam, summary);
+
     return;
   }
 
@@ -867,6 +878,7 @@ void UpdateTeamComposition(TFTeam team = TFTeam_Unassigned, int playersPerTeam =
     }
   }
   LogMessage("Kicked %d bots", kicked);
+  summary.kicked = kicked;
 
   //fill up remaining spots in the target comp
   int added = 0;
@@ -878,10 +890,26 @@ void UpdateTeamComposition(TFTeam team = TFTeam_Unassigned, int playersPerTeam =
     }
   }
   LogMessage("Added %d bots", added);
+  summary.added = added;
+
+  updateBotQuota(playersPerTeam, summary);
 
   if (updateBotNames) {
     CreateTimer(1.0, Timer_UpdateBotNames); //update after the bots have been added
   }
+}
+
+void updateBotQuota(int players_per_team = -1, const TeamCompUpdateSummary summary = {}) {
+  if (players_per_team < 0) {
+    players_per_team = cvarTeamSize.IntValue;
+  }
+
+  cvarTfBotQuota.IntValue = 2 * players_per_team - GetPlayerCount() + summary.kicked - summary.added;
+}
+
+enum struct TeamCompUpdateSummary {
+  int added;
+  int kicked;
 }
 
 Action Timer_UpdateBotNames(Handle handle) {
