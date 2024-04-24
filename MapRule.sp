@@ -2,6 +2,7 @@
 #define MAP_RULE_RADIUS 180.0 //value in hammer units
 #define MAX_MAP_RULES 32
 #define ERROR_SIZE 255
+#define MAX_DESCRIPTION_SIZE 255
 
 #define DATABASE_NAME "st_mapRules"
 
@@ -45,12 +46,20 @@ void InitDB() {
     tpLocX REAL,\
     tpLocY REAL,\
     tpLocZ REAL,\
+    description TEXT NOT NULL\
     )")) {
     LogSQLError("Failed to create table");
   }
 }
 
-void LoadMapRules(const char map[MAX_MAP_NAME_SIZE]) {
+void LoadMapRules(const char[] map = "") {
+  char mapBuf[MAX_MAP_NAME_SIZE];
+  if (strlen(map) == 0) {
+    GetCurrentMap(mapBuf, sizeof(mapBuf));
+  } else {
+    strcopy(mapBuf, sizeof(mapBuf), map);
+  }
+
   if (db == null) {
     InitDB();
   }
@@ -64,9 +73,9 @@ void LoadMapRules(const char map[MAX_MAP_NAME_SIZE]) {
       return;
     }
   }
-  SQL_BindParamString(preparedStatement, 0, map, false);
+  SQL_BindParamString(preparedStatement, 0, mapBuf, false);
   if (!SQL_Execute(preparedStatement)) {
-    LogSQLError("Failed to query map rules for map '%s'", map);
+    LogSQLError("Failed to query map rules for map '%s'", mapBuf);
     return;
   }
 
@@ -87,18 +96,19 @@ void LoadMapRules(const char map[MAX_MAP_NAME_SIZE]) {
       }
       case 1: {
         rule.action = MapRuleAction_Tp;
-        rule.teleportLocation[0] = SQL_FetchFloat(preparedStatement, p++);
-        rule.teleportLocation[1] = SQL_FetchFloat(preparedStatement, p++);
-        rule.teleportLocation[2] = SQL_FetchFloat(preparedStatement, p++);
       }
     }
+    rule.teleportLocation[0] = SQL_FetchFloat(preparedStatement, p++);
+    rule.teleportLocation[1] = SQL_FetchFloat(preparedStatement, p++);
+    rule.teleportLocation[2] = SQL_FetchFloat(preparedStatement, p++);
+    SQL_FetchString(preparedStatement, p++, rule.description, sizeof(rule.description));
 
     AddMapRuleToCache(rule);
   }
 
   delete preparedStatement;
 
-  PrintToServer("Loaded %d map rules", activeMapRulesLen);
+  PrintToServer("Loaded %d map rules for map %s", activeMapRulesLen, mapBuf);
 }
 
 /**
@@ -107,7 +117,7 @@ void LoadMapRules(const char map[MAX_MAP_NAME_SIZE]) {
 void AddMapRule(MapRule rule) {
   static DBStatement addWithTpStatement = null;
   if (addWithTpStatement == null) {
-    if ((addWithTpStatement = SQL_PrepareQuery(db, "INSERT INTO mapRules (map, rangeMin, rangeMax, locationX, locationY, locationZ, action, tpLocX, tpLocY, tpLocZ) VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?, ?)", error, ERROR_SIZE)) == INVALID_HANDLE) {
+    if ((addWithTpStatement = SQL_PrepareQuery(db, "INSERT INTO mapRules (map, rangeMin, rangeMax, locationX, locationY, locationZ, action, tpLocX, tpLocY, tpLocZ, description) VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?)", error, ERROR_SIZE)) == INVALID_HANDLE) {
       LogSQLError("Failed to prepare statement to add map rule with tp to db");
       addWithTpStatement = null;
       return;
@@ -115,7 +125,7 @@ void AddMapRule(MapRule rule) {
   }
   static DBStatement addWithKillStatement = null;
   if (addWithKillStatement == null) {
-    if ((addWithKillStatement = SQL_PrepareQuery(db, "INSERT INTO mapRules (map, rangeMin, rangeMax, locationX, locationY, locationZ, action) VALUES (?, ?, ?, ?, ?, ?, 0)", error, ERROR_SIZE)) == INVALID_HANDLE) {
+    if ((addWithKillStatement = SQL_PrepareQuery(db, "INSERT INTO mapRules (map, rangeMin, rangeMax, locationX, locationY, locationZ, action, description) VALUES (?, ?, ?, ?, ?, ?, 0, ?)", error, ERROR_SIZE)) == INVALID_HANDLE) {
       LogSQLError("Failed to prepare statement to add map rule with kill to db");
       addWithKillStatement = null;
       return;
@@ -157,6 +167,7 @@ void AddMapRule(MapRule rule) {
       SQL_BindParamFloat(addStatement, p++, rule.teleportLocation[2]);
     }
   }
+  SQL_BindParamString(addStatement, p++, rule.description, false);
 
   if (!SQL_Execute(addStatement)) {
     LogSQLError("failed to add map rule to db");
@@ -234,6 +245,7 @@ enum struct MapRule {
   float location[3];
   MapRuleAction action;
   float teleportLocation[3];
+  char description[MAX_DESCRIPTION_SIZE];
 
   bool appliesTo(int client) {
     float location[3];

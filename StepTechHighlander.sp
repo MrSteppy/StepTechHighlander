@@ -3,6 +3,7 @@
 #include <tf2_stocks>
 #include <NamePool.sp>
 #include <str_util.sp>
+#include <MapRule.sp>
 
 #define NAME "StepTechHighlander"
 #define VERSION "1.0.0-SNAPSHOT"
@@ -86,6 +87,7 @@ public void OnPluginStart() {
 
   RegAdminCmd("st_namepool_add", Command_NamePoolAdd, ADMFLAG_GENERIC, "[class name]|[class id]|any [names...] - add names to the namepool");
   RegAdminCmd("st_test", Command_Test, ADMFLAG_GENERIC, "The usual test command");
+  RegAdminCmd("map_rule", Command_MapRule, ADMFLAG_GENERIC, "Manage map rules for the current map");
 
   //listener
   HookEvent("tournament_stateupdate", Event_ReadyUp);
@@ -117,6 +119,7 @@ public void OnClientConnected(int client) {
 
 public void OnMapStart() {
   StartLobbyMode(.clean = true);
+  LoadMapRules();
 }
 
 int GetPlayerCount() {
@@ -236,6 +239,236 @@ int GetClientByName(const char[] name) {
 }
 
 //commands
+
+Action Command_MapRule(int client, int args) {
+  Command_MapRule0(client, args);
+  return Plugin_Handled;
+}
+
+enum struct PendingMapRule {
+  MapRule rule;
+  bool valid;
+}
+
+void Command_MapRule0(int client, int args) {
+  //no args
+  if (args == 0) {
+    ReplyToCommand(client, "Manage the map rules for the current map. Usage:");
+    ShowMapRuleCommandUsage(client);
+    return;
+  }
+  
+  static PendingMapRule pendingAdditions[MAXPLAYERS];
+
+  char subCommand[32];
+  GetCmdArg(1, subCommand, sizeof(subCommand));
+  
+  //list
+  if (streq("list", subCommand)) {
+    if (activeMapRulesLen == 0) {
+      ReplyToCommand(client, "Currently there are no maprules defined");
+      return;
+    } 
+
+    ReplyToCommand(client, "ID | active score range | action | description");
+    for (int i = 0; i < activeMapRulesLen; i++) {
+      MapRule rule;
+      rule = activeMapRules[i];
+      char action[32];
+      switch (rule.action) {
+        case MapRuleAction_Kill: action = "kill";
+        case MapRuleAction_Tp: action = "tp";
+      }
+      ReplyToCommand(client, "%d | %d..%d | %s | %s", rule.id, rule.scoreRange.start, rule.scoreRange.end, action, rule.description);
+    }
+    
+    return;
+  } 
+
+  //delete
+  if (streq("delete", subCommand)) {
+    if (args < 2) {
+      ReplyToCommand(client, "Missing argument: id");
+      return;
+    }
+    
+    int id;
+    if (!GetCmdArgIntEx(2, id)) {
+      ReplyToCommand(client, "Please provide the id of the map rule you want to delete as whole number");
+      return;
+    }
+    
+    DeleteMapRule(id);
+    ReplyToCommand(client, "Deleted map rule with id %d", id);
+    
+    return;
+  } 
+
+  //add
+  if (streq("add", subCommand)) {
+    if (!CheckIsPlayer(client)) {
+      return;
+    }
+    
+    //score range
+    if (args < 2) {
+      ReplyToCommand(client, "Missing argument: scoreRange");
+      return;
+    }
+    
+    Range scoreRange;
+    char scoreRangeArg[16];
+    GetCmdArg(2, scoreRangeArg, sizeof(scoreRangeArg));
+
+    int index = IndexOf(scoreRangeArg, "..");
+    if (index < 0) {
+      int value;
+      if (!StringToIntEx(scoreRangeArg, value)) {
+        ReplyToCommand(client, "Please provide a single number (3) or a range (2..7) as score range");
+        return;
+      }
+      scoreRange.start = value;
+      scoreRange.end = value;
+    } else {
+      char arg[sizeof(scoreRangeArg)];
+      strcopy(arg, index + 1, scoreRangeArg);
+      if (!StringToIntEx(arg, scoreRange.start)) {
+        ReplyToCommand(client, "Invalid range start: '%s' is not a whole number", arg);
+        return;
+      }
+      strcopy(arg, sizeof(arg), scoreRangeArg[index + 2]);
+      if (!StringToIntEx(arg, scoreRange.end)) {
+        ReplyToCommand(client, "Invalid range end: '%s' is not a whole number", arg);
+        return;
+      }
+    }
+
+    //action
+    if (args < 3) {
+      ReplyToCommand(client, "Missing argument: action");
+      return;
+    }
+
+    MapRuleAction action;
+    char actionArg[16];
+    GetCmdArg(3, actionArg, sizeof(actionArg));
+
+    if (streq("kill", actionArg)) {
+      action = MapRuleAction_Kill;
+    } else if (streq("tp", actionArg)) {
+      action = MapRuleAction_Tp;
+    } else {
+      ReplyToCommand(client, "Invalid action '%s'. Please use 'kill' or 'tp'", actionArg);
+      return;
+    }
+
+    //description
+    char description[MAX_DESCRIPTION_SIZE];
+    for (int i = 4; i <= args; i++) {
+      char arg[MAX_DESCRIPTION_SIZE];
+      GetCmdArg(i, arg, sizeof(arg));
+      append_str(description, sizeof(description), arg);
+    }
+
+    //build it all together
+    MapRule rule;
+    GetCurrentMap(rule.map, sizeof(rule.map));
+    GetClientAbsOrigin(client, rule.location);
+    rule.scoreRange = scoreRange;
+    rule.action = action;
+    rule.description = description;
+
+    if (action == MapRuleAction_Tp) {
+      pendingAdditions[client].rule = rule;
+      pendingAdditions[client].valid = true;
+
+      ReplyToCommand(client, "Please go to the teleport target location and run 'map_rule here'");
+    } else {
+      AddMapRule(rule);
+      ReplyToCommand(client, "map rule has been added with id %d", rule.id);
+    }
+
+    return;
+  } 
+  
+  //here
+  if (streq("here", subCommand)) {
+    if (!CheckIsPlayer(client)) {
+      return;
+    }
+
+    if (!pendingAdditions[client].valid) {
+      ReplyToCommand(client, "There is no map rule pending to feed your location into!");
+      return;
+    }
+
+    MapRule rule;
+    rule = pendingAdditions[client].rule;
+    pendingAdditions[client].valid = false;
+
+    GetClientAbsOrigin(client, rule.teleportLocation);
+
+    AddMapRule(rule);
+    ReplyToCommand(client, "map rule has been added with id %d", rule.id);
+
+    return;
+  }
+  
+  //tpTo
+  if (streq("tpTo", subCommand)) {
+    if (!CheckIsPlayer(client)) {
+      return;
+    }
+
+    //id
+    if (args < 2) {
+      ReplyToCommand(client, "Missing argument: id");
+      return;
+    }
+    int id;
+    if (!GetCmdArgIntEx(2, id)) {
+      ReplyToCommand(client, "Please provide the id of the map rule you want to teleport to as a whole number");
+      return;
+    }
+
+    MapRule rule;
+    bool found = false;
+    for (int i = 0; i < activeMapRulesLen; i++) {
+      rule = activeMapRules[i];
+      if (rule.id == id) {
+        found = true;
+        break;
+      }
+    }
+    if (!found) {
+      ReplyToCommand(client, "There is no map rule with the id %d on the current map!", id);
+      return;
+    }
+
+    TeleportEntity(client, rule.location);
+
+    return;
+  } 
+
+  ReplyToCommand(client, "Invalid sub command. Use one of the following:");
+  ShowMapRuleCommandUsage(client);
+}
+
+bool CheckIsPlayer(int client) {
+  if (client == 0) {
+    ReplyToCommand(client, "This command may only be executed by a player and not the console");
+    return false;
+  }
+  return true;
+}
+
+void ShowMapRuleCommandUsage(int client) {
+  ReplyToCommand(client, "list - List all map rules for the current map");
+  ReplyToCommand(client, "delete [id] - Delete a map rule with the given id");
+  ReplyToCommand(client, "add [scoreRange] [action] [description...] - Add a map rule at the current location which is active in the given score range");
+  ReplyToCommand(client, "here - Feed your current location to a pending map rule addition");
+  ReplyToCommand(client, "tpTo [id] - Teleport to the location of a map rule");
+}
 
 Action Command_Test(int client, int args) {
   StartLobbyModeTimed();
@@ -732,7 +965,7 @@ Action Timer_AutoLobbyMode(Handle handle) {
   panel.DrawItem("ok");
 
   for (int client = 1; client <= MaxClients; client++) {
-    if (IsClientInGame(client) && IndexOf(lobbyModeAcks, lobbyModeAcksLen, client) == -1) {
+    if (IsClientInGame(client) && ArrIndexOfInt(lobbyModeAcks, lobbyModeAcksLen, client) == -1) {
       panel.Send(client, PanelHandler_AutoLobbyMode, 1);
     }
   }
@@ -742,7 +975,7 @@ Action Timer_AutoLobbyMode(Handle handle) {
   return Plugin_Continue;
 }
 
-int IndexOf(const int[] arr, int arrLen, int elem) {
+int ArrIndexOfInt(const int[] arr, int arrLen, int elem) {
   for (int i = 0; i < arrLen; i++) {
     if (arr[i] == elem) {
       return i;
@@ -756,7 +989,7 @@ int PanelHandler_AutoLobbyMode(Menu menu, MenuAction action, int client, int sel
     if (selection == 1) {
       cancelLobbyMode = true;
       Log4All(client, "Cancelled lobby mode. Continuing match!");
-    } else if (selection == 2 && IndexOf(lobbyModeAcks, lobbyModeAcksLen, client) == -1) {
+    } else if (selection == 2 && ArrIndexOfInt(lobbyModeAcks, lobbyModeAcksLen, client) == -1) {
       lobbyModeAcks[lobbyModeAcksLen++] = client;
     }
   }

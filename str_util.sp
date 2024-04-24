@@ -15,6 +15,10 @@ int append_str(char[] dest, int destSize, const char[] src) {
   return strcopy(dest[destLen], destSize - destLen, src);
 }
 
+bool streq(const char[] left, const char[] right, bool ignoreCase = false) {
+  return strcmp(left, right, !ignoreCase) == 0;
+}
+
 int ArrayBufSize(int len, int elemBufSize) {
   return 3 + len * (elemBufSize + 2);
 }
@@ -37,4 +41,20 @@ void ToLowercase(char[] s) {
   for (int i = 0; i < strlen(s); i++) {
     s[i] = CharToLower(s[i]);
   }
+}
+
+int IndexOf(const char[] string, const char[] pattern) {
+  for (int index = 0, patLen = strlen(pattern), bound = strlen(string) - patLen; index < bound; index++) {
+    bool match = true;
+    for (int i = 0; i < patLen; i++) {
+      if (string[index + i] != pattern[i]) {
+        match = false;
+        break;
+      }
+    }
+    if (match) {
+      return index;
+    }
+  }
+  return -1;
 }
