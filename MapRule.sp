@@ -17,7 +17,6 @@ void LogSQLError(const char[] detailMessage, any ...) {
   }
   char detailBuf[255];
   VFormat(detailBuf, sizeof(detailBuf), detailMessage, 2);
-  PrintToServer("[ERROR] %s: %s", detailBuf, error);
   LogError("%s: %s", detailBuf, error);
   error = ""; //clear the error, so we don't accidentally log it again
 }
@@ -108,7 +107,7 @@ void LoadMapRules(const char[] map = "") {
 
   delete preparedStatement;
 
-  PrintToServer("Loaded %d map rules for map %s", activeMapRulesLen, mapBuf);
+  LogMessage("Loaded %d map rules for map %s", activeMapRulesLen, mapBuf);
 }
 
 /**
@@ -193,7 +192,7 @@ void AddMapRule(MapRule rule) {
 void DeleteMapRule(int id) {
   static DBStatement preparedStatement = null;
   if (preparedStatement == null) {
-    if ((preparedStatement = SQL_PrepareQuery(db, "DELETE FROM mapRules WHERE id = ?", error, ERROR_SIZE))) {
+    if ((preparedStatement = SQL_PrepareQuery(db, "DELETE FROM mapRules WHERE id = ?", error, ERROR_SIZE)) == INVALID_HANDLE) {
       LogSQLError("Failed to prepare statement to delete map rule");
       preparedStatement = null;
       return;

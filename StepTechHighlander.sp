@@ -22,6 +22,7 @@
 #define LOBBY_MODE_COUNT_DOWN 10
 #define LOBBY_MODE_INFO_INTERVAL 5.0
 #define ACK_COUNT_DOWN 5
+#define ENFORCE_MAP_RULES_AFTER 5
 
 public Plugin myinfo = {
   name = NAME,
@@ -43,6 +44,7 @@ ReadyState readyState;
 NamePool namePool;
 
 int fullRoundsPlayed = 0;
+int blueRoundScore = 0;
 
 public void OnPluginStart() {
   LogMessage("Starting %s v%s", NAME, VERSION);
@@ -94,6 +96,7 @@ public void OnPluginStart() {
   HookEvent("player_changeclass", Event_PlayerChangeClass);
   HookEvent("teamplay_round_win", Event_TeamplayRoundWin);
   HookEvent("player_team", Event_PlayerChangeTeam);
+  HookEvent("teamplay_point_captured", Event_ControlPointCapped);
 
   ServerCommand("exec namepool\n"); //reload namepool
 
@@ -106,6 +109,7 @@ public void OnPluginStart() {
 
   //timers
   CreateTimer(LOBBY_MODE_INFO_INTERVAL, Timer_LobbyModeInfo, _, TIMER_REPEAT);
+  CreateTimer(1.0, Timer_MapRules, _, TIMER_REPEAT);
 }
 
 public void OnClientConnected(int client) {
@@ -118,6 +122,8 @@ public void OnClientConnected(int client) {
 }
 
 public void OnMapStart() {
+  blueRoundScore = 0;
+
   StartLobbyMode(.clean = true);
   LoadMapRules();
 }
@@ -368,6 +374,7 @@ void Command_MapRule0(int client, int args) {
       char arg[MAX_DESCRIPTION_SIZE];
       GetCmdArg(i, arg, sizeof(arg));
       append_str(description, sizeof(description), arg);
+      append_str(description, sizeof(description), " ");
     }
 
     //build it all together
@@ -471,7 +478,7 @@ void ShowMapRuleCommandUsage(int client) {
 }
 
 Action Command_Test(int client, int args) {
-  StartLobbyModeTimed();
+  ReplyToCommand(client, "Blue round score is %d", blueRoundScore);
   return Plugin_Handled;
 }
 
@@ -661,6 +668,7 @@ void StartLobbyMode(int client = 0, bool clean = false) {
     KickBots();
   }
   fullRoundsPlayed = 0;
+  blueRoundScore = 0;
   cvarMpTournament.IntValue = 1;
   ServerCommand(RESTART_TOURNAMENT_CMD);
   Log4All(client, "Switched to lobby mode");
@@ -678,6 +686,76 @@ bool IsLobbyModeActive() {
 Action Timer_LobbyModeInfo(Handle handle) {
   if (IsLobbyModeActive()) {
     PrintHintTextToAll("Lobby mode - ready up to start the round (F4) or use '!st_help' in chat for a command overview");
+  }
+
+  return Plugin_Continue;
+}
+
+enum struct ApplyingMapRule {
+  MapRule rule;
+  int since; //how long the rule applied to a client in seconds
+}
+
+Action Timer_MapRules(Handle handle) {
+  static ApplyingMapRule appliyingRules[MAXPLAYERS];
+  
+  for (int client = 1; client <= MaxClients; client++) {
+    if (!IsClientConnected(client)) {
+      continue;
+    }
+
+    ApplyingMapRule applyingRule;
+    applyingRule = appliyingRules[client];
+    
+    //find applying rule
+    MapRule rule;
+    bool found = false;
+    for (int i = 0; i < activeMapRulesLen; i++) {  
+      rule = activeMapRules[i];
+      if (!rule.scoreRange.contains(blueRoundScore)) {
+        continue;
+      }
+
+      if (!rule.appliesTo(client)) {
+        continue;
+      }
+
+      found = true;
+      break;
+    }
+
+    //update apply data
+    if (found) {
+      if (rule.id == applyingRule.rule.id) {
+        applyingRule.since++;
+      } else {
+        applyingRule.rule = rule;
+        applyingRule.since = 1;
+      }
+    } else {
+      applyingRule.since = 0;
+    }
+
+    //enforce rule if needed
+    if (applyingRule.since >= ENFORCE_MAP_RULES_AFTER) {
+      bool enforced = false;
+      switch (rule.action) {
+        case MapRuleAction_Kill: {
+          if (IsBot(client)) {
+            ClientCommand(client, "kill");
+            enforced = true;
+          }
+        }
+        case MapRuleAction_Tp: {
+          TeleportEntity(client, rule.teleportLocation);
+          enforced = true;
+        }
+      }
+      if (enforced) {
+        LogMessage("enforced map rule %d on client %d", rule.id, client);
+        applyingRule.since = 0;
+      }
+    }
   }
 
   return Plugin_Continue;
@@ -907,6 +985,13 @@ void Event_PlayerChangeClass(Event event, const char[] name, bool dontBroadcast)
 Action Timer_UpdateTeamComp(Handle handle) {
   UpdateTeamComposition();
   return Plugin_Stop;
+}
+
+void Event_ControlPointCapped(Event event, const char[] name, bool dontBroadcast) {
+  int teamIndex = event.GetInt("team");
+
+  blueRoundScore++;
+  LogMessage("Control point has been captured by team %d. Updated blueRoundScore: %d", teamIndex, blueRoundScore);
 }
 
 void Event_PlayerChangeTeam(Event event, const char[] name, bool dontBroadcast) {
