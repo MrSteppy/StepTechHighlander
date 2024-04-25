@@ -4,6 +4,8 @@
 #include <NamePool.sp>
 #include <str_util.sp>
 #include <MapRule.sp>
+#include <SetLocation.sp>
+#include <Math.sp>
 
 #define NAME "StepTechHighlander"
 #define VERSION "1.0.0-SNAPSHOT"
@@ -22,7 +24,8 @@
 #define LOBBY_MODE_COUNT_DOWN 10
 #define LOBBY_MODE_INFO_INTERVAL 5.0
 #define ACK_COUNT_DOWN 5
-#define ENFORCE_MAP_RULES_AFTER 5
+#define MAX_SCORE 100
+#define MAP_RULE_CHECK_TICK 0.5
 
 public Plugin myinfo = {
   name = NAME,
@@ -42,6 +45,7 @@ CommandInfo commands[MAX_COMMANDS];
 int commandsLen = 0;
 ReadyState readyState;
 NamePool namePool;
+bool mapRuleDebug[MAXPLAYERS];
 
 int fullRoundsPlayed = 0;
 int blueRoundScore = 0;
@@ -81,11 +85,12 @@ public void OnPluginStart() {
   RegCommand("st_team_size", Command_TeamSize, "[teamsize] - Set how many players each team should have");
   RegCommand("st_tp_bots", Command_Teleport_Bots, "- Teleports all bots of your team to your location");
   RegCommand("st_lobby", Command_Lobby, "<clean> - Switch to lobby mode. Use clean lobby to kick all bots.");
-  RegCommand("eggseck", Command_Eggseck, "start|pause - starts or pauses the match (Bitte hau mich nicht, Nepa, der Command war Craftis Idee ^^')");
+  RegCommand("eggseck", Command_Eggseck, "start|pause - Starts or pauses the match (Bitte hau mich nicht, Nepa, der Command war Craftis Idee ^^')");
   RegCommand("st_update_team_comp", Command_UpdateTeamComp, "- Update the classes of the bots");
   RegCommand("st_difficulty", Command_Difficulty, "[0-3] - Change the bot difficulty");
   RegCommand("st_restart", Command_Restart, "<[inSecs]> - Restarts the server in the specified number of seconds");
-  RegCommand("menu", Command_Menu, "- open a quick access menu for some of the commands");
+  RegCommand("menu", Command_Menu, "- Open a quick access menu for some of the commands");
+  RegCommand("st_set", Command_Set, "[name] - Give your current position a name to reference it later in another command or such");
 
   RegAdminCmd("st_namepool_add", Command_NamePoolAdd, ADMFLAG_GENERIC, "[class name]|[class id]|any [names...] - add names to the namepool");
   RegAdminCmd("st_test", Command_Test, ADMFLAG_GENERIC, "The usual test command");
@@ -109,7 +114,7 @@ public void OnPluginStart() {
 
   //timers
   CreateTimer(LOBBY_MODE_INFO_INTERVAL, Timer_LobbyModeInfo, _, TIMER_REPEAT);
-  CreateTimer(1.0, Timer_MapRules, _, TIMER_REPEAT);
+  CreateTimer(MAP_RULE_CHECK_TICK, Timer_MapRuleCheck, _, TIMER_REPEAT);
 }
 
 public void OnClientConnected(int client) {
@@ -246,14 +251,27 @@ int GetClientByName(const char[] name) {
 
 //commands
 
-Action Command_MapRule(int client, int args) {
-  Command_MapRule0(client, args);
+Action Command_Set(int client, int args) {
+  if (args < 1) {
+    ReplyToCommand(client, "Please provide a name for your current location");
+    return Plugin_Handled;
+  }
+  if (!CheckIsPlayer(client)) {
+    return Plugin_Handled;
+  }
+
+  char name[MAX_LOCATION_NAME_SIZE];
+  GetCmdArg(1, name, sizeof(name));
+  AddSetLocation(client, name);
+
+  ReplyToCommand(client, "Successfully set location '%s' at your current position", name);
+
   return Plugin_Handled;
 }
 
-enum struct PendingMapRule {
-  MapRule rule;
-  bool valid;
+Action Command_MapRule(int client, int args) {
+  Command_MapRule0(client, args);
+  return Plugin_Handled;
 }
 
 void Command_MapRule0(int client, int args) {
@@ -263,8 +281,6 @@ void Command_MapRule0(int client, int args) {
     ShowMapRuleCommandUsage(client);
     return;
   }
-  
-  static PendingMapRule pendingAdditions[MAXPLAYERS];
 
   char subCommand[32];
   GetCmdArg(1, subCommand, sizeof(subCommand));
@@ -276,7 +292,7 @@ void Command_MapRule0(int client, int args) {
       return;
     } 
 
-    ReplyToCommand(client, "ID | active score range | action | description");
+    ReplyToCommand(client, "ID | active score range | activation time | action | description");
     for (int i = 0; i < activeMapRulesLen; i++) {
       MapRule rule;
       rule = activeMapRules[i];
@@ -285,7 +301,7 @@ void Command_MapRule0(int client, int args) {
         case MapRuleAction_Kill: action = "kill";
         case MapRuleAction_Tp: action = "tp";
       }
-      ReplyToCommand(client, "%d | %d..%d | %s | %s", rule.id, rule.scoreRange.start, rule.scoreRange.end, action, rule.description);
+      ReplyToCommand(client, "%d | %d..%d | %.1f sec | %s | %s", rule.id, rule.scoreRange.start, rule.scoreRange.end, rule.activationTime, action, rule.description);
     }
     
     return;
@@ -316,15 +332,23 @@ void Command_MapRule0(int client, int args) {
       return;
     }
     
-    //score range
-    if (args < 2) {
-      ReplyToCommand(client, "Missing argument: scoreRange");
+    int argNum = 2;
+    if (args < argNum) {
+      //show detailed overview:
+      ReplyToCommand(client, "Defines a map rule for the current map which is active only in the provided score range. \
+      Requires two locations (can be set over !st_set) which will define a circle as area of the map rule. activationTime is the number of seconds a \
+      client has to spend inside the area of the rule for it to get enforced.");
+      ReplyToCommand(client, "Examples: ");
+      ReplyToCommand(client, "!map_rule add 0..2 a->b 5.0 kill \"Circle of death\" - Defines a map rule which is active as long as blue has captured \
+      between 0 and 2 control points this round, with a circular area from a to b which kills all bots which spend 5 seconds inside");
+      ReplyToCommand(client, "!map_rule add 3 a->b 3.0 tp c \"Gate 5\" - When blue has scored exactly three points, teleport all clients to location c after 3 seconds");
       return;
     }
     
+    //score range
     Range scoreRange;
     char scoreRangeArg[16];
-    GetCmdArg(2, scoreRangeArg, sizeof(scoreRangeArg));
+    GetCmdArg(argNum++, scoreRangeArg, sizeof(scoreRangeArg));
 
     int index = IndexOf(scoreRangeArg, "..");
     if (index < 0) {
@@ -337,27 +361,86 @@ void Command_MapRule0(int client, int args) {
       scoreRange.end = value;
     } else {
       char arg[sizeof(scoreRangeArg)];
+
       strcopy(arg, index + 1, scoreRangeArg);
-      if (!StringToIntEx(arg, scoreRange.start)) {
+      if (strlen(arg) == 0) {
+        scoreRange.start = 0;
+      } else if (!StringToIntEx(arg, scoreRange.start)) {
         ReplyToCommand(client, "Invalid range start: '%s' is not a whole number", arg);
         return;
       }
+      
       strcopy(arg, sizeof(arg), scoreRangeArg[index + 2]);
-      if (!StringToIntEx(arg, scoreRange.end)) {
+      if (strlen(arg) == 0) {
+        scoreRange.end = MAX_SCORE;
+      } else if (!StringToIntEx(arg, scoreRange.end)) {
         ReplyToCommand(client, "Invalid range end: '%s' is not a whole number", arg);
         return;
       }
     }
 
+    //location range
+    if (args < argNum) {
+      ReplyToCommand(client, "Missing argument: locationRange");
+      return;
+    }
+
+    char locationRangeArg[2 * MAX_LOCATION_NAME_SIZE + 2];
+    int arrowIndex = IndexOf(locationRangeArg, "->");
+    if (arrowIndex < 0) {
+      ReplyToCommand(client, "Please provide a valid location range (eg.: loc1->loc2)");
+      return;
+    }
+    char locationName[MAX_LOCATION_NAME_SIZE];
+    strcopy(locationName, arrowIndex + 1, locationRangeArg);
+    SetLocation locA;
+    if (!GetSetLocation(locA, client, locationName)) {
+      ReplyToCommand(client, "Invalid location name: You have not set a location with the name '%s'", locationName);
+      return;
+    }
+    strcopy(locationName, sizeof(locationName), locationRangeArg[arrowIndex + 2]);
+    SetLocation locB;
+    if (!GetSetLocation(locB, client, locationName)) {
+      ReplyToCommand(client, "Invalid location name: You have not set a location with the name '%s'", locationName);
+      return;
+    }
+
+    float location[3];
+    location[0] = (locA.location[0] + locB.location[0]) / 2; //calculate the center of the two points
+    location[1] = (locA.location[1] + locB.location[1]) / 2;
+    location[2] = (locA.location[2] + locB.location[2]) / 2;
+
+    float dx = locA.location[0] - locB.location[0];
+    float dz = locA.location[0] - locB.location[0];
+    float distance = SquareRoot(dx * dx + dz * dz);
+
+    if (distance < 0.1) {
+      ReplyToCommand(client, "Warning: locations are very close to each other. It is unlikely that this map rule will be useful");
+    }
+
+    float radius = distance / 2;
+
+    //activation time
+    if (args < argNum) {
+      ReplyToCommand(client, "Missing argument: activation time");
+      return;
+    }
+
+    float activationTime;
+    if (!GetCmdArgFloatEx(argNum++, activationTime)) {
+      ReplyToCommand(client, "Please provide the activation time in seconds, e.g.: 3.0 for three seconds");
+      return;
+    }
+
     //action
-    if (args < 3) {
+    if (args < argNum) {
       ReplyToCommand(client, "Missing argument: action");
       return;
     }
 
     MapRuleAction action;
     char actionArg[16];
-    GetCmdArg(3, actionArg, sizeof(actionArg));
+    GetCmdArg(argNum++, actionArg, sizeof(actionArg));
 
     if (streq("kill", actionArg)) {
       action = MapRuleAction_Kill;
@@ -368,61 +451,55 @@ void Command_MapRule0(int client, int args) {
       return;
     }
 
-    //description
-    char description[MAX_DESCRIPTION_SIZE];
-    for (int i = 4; i <= args; i++) {
-      char arg[MAX_DESCRIPTION_SIZE];
-      GetCmdArg(i, arg, sizeof(arg));
-      append_str(description, sizeof(description), arg);
-      append_str(description, sizeof(description), " ");
+    float teleportLocation[3];
+    switch (action) {
+      case MapRuleAction_Tp: {
+        if (args < argNum) {
+          ReplyToCommand(client, "Missing argument: teleport location");
+          return;
+        }
+
+        char teleportLocationName[MAX_LOCATION_NAME_SIZE];
+        GetCmdArg(argNum++, teleportLocationName, sizeof(teleportLocationName));
+
+        SetLocation setLocation;
+        if (!GetSetLocation(setLocation, client, teleportLocationName)) {
+          ReplyToCommand(client, "Invalid location name: You have not set a location with the name '%s'", teleportLocationName);
+          return;
+        }
+
+        teleportLocation = setLocation.location;
+      }
     }
+
+    //description
+    if (args < argNum) {
+      ReplyToCommand(client, "Missing argument: Description");
+      return;
+    }
+
+    char description[MAX_DESCRIPTION_SIZE];
+    GetCmdArg(argNum++, description, sizeof(description));
 
     //build it all together
     MapRule rule;
     GetCurrentMap(rule.map, sizeof(rule.map));
-    GetClientAbsOrigin(client, rule.location);
+    GetClientAbsOrigin(client, rule.center);
     rule.scoreRange = scoreRange;
+    rule.radius = radius;
+    rule.activationTime = activationTime;
     rule.action = action;
+    rule.targetLocation = teleportLocation;
     rule.description = description;
-
-    if (action == MapRuleAction_Tp) {
-      pendingAdditions[client].rule = rule;
-      pendingAdditions[client].valid = true;
-
-      ReplyToCommand(client, "Please go to the teleport target location and run 'map_rule here'");
-    } else {
-      AddMapRule(rule);
-      ReplyToCommand(client, "map rule has been added with id %d", rule.id);
-    }
-
-    return;
-  } 
-  
-  //here
-  if (streq("here", subCommand)) {
-    if (!CheckIsPlayer(client)) {
-      return;
-    }
-
-    if (!pendingAdditions[client].valid) {
-      ReplyToCommand(client, "There is no map rule pending to feed your location into!");
-      return;
-    }
-
-    MapRule rule;
-    rule = pendingAdditions[client].rule;
-    pendingAdditions[client].valid = false;
-
-    GetClientAbsOrigin(client, rule.teleportLocation);
 
     AddMapRule(rule);
     ReplyToCommand(client, "map rule has been added with id %d", rule.id);
 
     return;
-  }
+  } 
   
-  //tpTo
-  if (streq("tpTo", subCommand)) {
+  //tp
+  if (streq("tp", subCommand)) {
     if (!CheckIsPlayer(client)) {
       return;
     }
@@ -436,6 +513,18 @@ void Command_MapRule0(int client, int args) {
     if (!GetCmdArgIntEx(2, id)) {
       ReplyToCommand(client, "Please provide the id of the map rule you want to teleport to as a whole number");
       return;
+    }
+
+    bool target = false;
+    if (args >= 3) {
+      char param[16];
+      GetCmdArg(3, param, sizeof(param));
+      if (streq("--target", param)) {
+        target = true;
+      } else {
+        ReplyToCommand(client, "Invalid parameter '%s'", param);
+        return;
+      }
     }
 
     MapRule rule;
@@ -452,10 +541,37 @@ void Command_MapRule0(int client, int args) {
       return;
     }
 
-    TeleportEntity(client, rule.location);
+    if (target) {
+      if (rule.action != MapRuleAction_Tp) {
+        ReplyToCommand(client, "rule %d has no target location to teleport to", id);
+        return;
+      }
 
+      TeleportEntity(client, rule.targetLocation);
+    } else {
+      TeleportEntity(client, rule.center);
+    }
+  
     return;
   } 
+
+  //debug
+  if (streq("debug", subCommand)) {
+    if (!CheckIsPlayer(client)) {
+      return;
+    }
+
+    bool enable = !mapRuleDebug[client];
+    mapRuleDebug[client] = enable;
+
+    if (enable) {
+      ReplyToCommand(client, "Debug mode now enabled. You will now get a notification if a map rule would apply to you.");
+    } else {
+      ReplyToCommand(client, "Debug mode now disabled");
+    }
+
+    return;
+  }
 
   ReplyToCommand(client, "Invalid sub command. Use one of the following:");
   ShowMapRuleCommandUsage(client);
@@ -472,9 +588,9 @@ bool CheckIsPlayer(int client) {
 void ShowMapRuleCommandUsage(int client) {
   ReplyToCommand(client, "list - List all map rules for the current map");
   ReplyToCommand(client, "delete [id] - Delete a map rule with the given id");
-  ReplyToCommand(client, "add [scoreRange] [action] [description...] - Add a map rule at the current location which is active in the given score range");
-  ReplyToCommand(client, "here - Feed your current location to a pending map rule addition");
-  ReplyToCommand(client, "tpTo [id] - Teleport to the location of a map rule");
+  ReplyToCommand(client, "add [scoreRange] [locationRange] [activationTime] [action] <[action parameters]> [description] - Add a map rule. Run without arguments for detailed syntax.");
+  ReplyToCommand(client, "tp [id] <--target> - Teleport to the location of a map rule, or it's target location");
+  ReplyToCommand(client, "debug - Toggle debug mode. Adds a visual hint which map rule would apply to your client");
 }
 
 Action Command_Test(int client, int args) {
@@ -693,10 +809,10 @@ Action Timer_LobbyModeInfo(Handle handle) {
 
 enum struct ApplyingMapRule {
   MapRule rule;
-  int since; //how long the rule applied to a client in seconds
+  int since; //how long the rule applied to a client in ticks
 }
 
-Action Timer_MapRules(Handle handle) {
+Action Timer_MapRuleCheck(Handle handle) {
   static ApplyingMapRule appliyingRules[MAXPLAYERS];
   
   for (int client = 1; client <= MaxClients; client++) {
@@ -704,24 +820,44 @@ Action Timer_MapRules(Handle handle) {
       continue;
     }
 
+    bool debugModeActive = mapRuleDebug[client];
+
+    //find applying map rules by location
+    MapRule[] rulesInRange = new MapRule[activeMapRulesLen];
+    int rulesInRangeLen = 0;
+
+    for (int i = 0; i < activeMapRulesLen; i++) {
+      MapRule rule;
+      rule = activeMapRules[i];
+      if (rule.appliesTo(client)) {
+        rulesInRange[rulesInRangeLen++] = rule;
+      }
+    }
+
     ApplyingMapRule applyingRule;
     applyingRule = appliyingRules[client];
     
-    //find applying rule
+    //find active rule with smallest distance to player
     MapRule rule;
     bool found = false;
-    for (int i = 0; i < activeMapRulesLen; i++) {  
-      rule = activeMapRules[i];
-      if (!rule.scoreRange.contains(blueRoundScore)) {
+    for (int i = 0; i < rulesInRangeLen; i++) {  
+      MapRule candidate;
+      candidate = rulesInRange[i];
+      
+      if (!candidate.scoreRange.contains(blueRoundScore)) {
         continue;
       }
 
-      if (!rule.appliesTo(client)) {
-        continue;
+      if (found) {
+        float clientLocation[3];
+        GetClientAbsOrigin(client, clientLocation);
+        if (DistanceSquared(clientLocation, candidate.center) < DistanceSquared(clientLocation, rule.center)) {
+          rule = candidate;
+        }
+      } else {
+        found = true;
+        rule = candidate;
       }
-
-      found = true;
-      break;
     }
 
     //update apply data
@@ -736,8 +872,51 @@ Action Timer_MapRules(Handle handle) {
       applyingRule.since = 0;
     }
 
+    if (debugModeActive) {
+      Panel panel = new Panel();
+
+      panel.SetTitle("map rule debug info");
+      char text[100];
+      int drawn = 0;
+      if (applyingRule.since > 0) {
+        Format(text, sizeof(text), "active: %d | %s", applyingRule.rule.id, applyingRule.rule.description);
+        panel.DrawText(text);
+        panel.DrawText("---other rules---");
+        drawn += 2;
+      } 
+      int drawBound = 8;
+      int numHiddenRules = rulesInRangeLen + (drawn / 2) - drawBound;
+      bool willFit = numHiddenRules <= 0;
+      if (!willFit) {
+        drawBound--;
+      }
+      
+      for (int i = 0; i < rulesInRangeLen && drawn < drawBound; i++) {
+        rule = rulesInRange[i];
+        char activeAtScore[6];
+        if (rule.scoreRange.contains(blueRoundScore)) {
+          activeAtScore = "true";
+        } else {
+          activeAtScore = "false";
+        }
+        Format(text, sizeof(text), "%d | active at current score: %s | %d", rule.id, activeAtScore, rule.description);
+        panel.DrawText(text);
+        drawn++;
+      }
+      if (!willFit) {
+        Format(text, sizeof(text), "...and %d others...", numHiddenRules);
+        panel.DrawText(text);
+      }
+
+      if (drawn > 0) {
+        panel.Send(client, PanelHandler_MapRuleDebug, 1);
+      }
+
+      delete panel;
+    }
+
     //enforce rule if needed
-    if (applyingRule.since >= ENFORCE_MAP_RULES_AFTER) {
+    if (applyingRule.since >= rule.activationTime) {
       bool enforced = false;
       switch (rule.action) {
         case MapRuleAction_Kill: {
@@ -747,18 +926,25 @@ Action Timer_MapRules(Handle handle) {
           }
         }
         case MapRuleAction_Tp: {
-          TeleportEntity(client, rule.teleportLocation);
+          TeleportEntity(client, rule.targetLocation);
           enforced = true;
         }
       }
       if (enforced) {
+        PrintToChat(client, "A map rule has been enforced on you");
         LogMessage("enforced map rule %d on client %d", rule.id, client);
         applyingRule.since = 0;
       }
     }
+
+    appliyingRules[client] = applyingRule; //store the changes
   }
 
   return Plugin_Continue;
+}
+
+int PanelHandler_MapRuleDebug(Menu menu, MenuAction action, int param1, int param2) {
+  return 0;
 }
 
 Action Command_Eggseck(int client, int args) {

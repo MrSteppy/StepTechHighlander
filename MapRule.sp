@@ -1,5 +1,4 @@
 #define MAX_MAP_NAME_SIZE 64
-#define MAP_RULE_RADIUS 180.0 //value in hammer units
 #define MAX_MAP_RULES 32
 #define ERROR_SIZE 255
 #define MAX_DESCRIPTION_SIZE 255
@@ -41,10 +40,12 @@ void InitDB() {
     locationX REAL NOT NULL,\
     locationY REAL NOT NULL,\
     locationZ REAL NOT NULL,\
+    radius REAL NOT NULL,\
+    activationTime REAL NOT NULL,\
     action INTEGER NOT NULL,\
-    tpLocX REAL,\
-    tpLocY REAL,\
-    tpLocZ REAL,\
+    tLocX REAL,\
+    tLocY REAL,\
+    tLocZ REAL,\
     description TEXT NOT NULL\
     )")) {
     LogSQLError("Failed to create table");
@@ -86,9 +87,11 @@ void LoadMapRules(const char[] map = "") {
     SQL_FetchString(preparedStatement, p++, rule.map, sizeof(rule.map));
     rule.scoreRange.start = SQL_FetchInt(preparedStatement, p++);
     rule.scoreRange.end = SQL_FetchInt(preparedStatement, p++);
-    rule.location[0] = SQL_FetchFloat(preparedStatement, p++);
-    rule.location[1] = SQL_FetchFloat(preparedStatement, p++);
-    rule.location[2] = SQL_FetchFloat(preparedStatement, p++);
+    rule.center[0] = SQL_FetchFloat(preparedStatement, p++);
+    rule.center[1] = SQL_FetchFloat(preparedStatement, p++);
+    rule.center[2] = SQL_FetchFloat(preparedStatement, p++);
+    rule.radius = SQL_FetchFloat(preparedStatement, p++);
+    rule.activationTime = SQL_FetchFloat(preparedStatement, p++);
     switch (SQL_FetchInt(preparedStatement, p++)) {
       case 0: {
         rule.action = MapRuleAction_Kill;
@@ -97,9 +100,9 @@ void LoadMapRules(const char[] map = "") {
         rule.action = MapRuleAction_Tp;
       }
     }
-    rule.teleportLocation[0] = SQL_FetchFloat(preparedStatement, p++);
-    rule.teleportLocation[1] = SQL_FetchFloat(preparedStatement, p++);
-    rule.teleportLocation[2] = SQL_FetchFloat(preparedStatement, p++);
+    rule.targetLocation[0] = SQL_FetchFloat(preparedStatement, p++);
+    rule.targetLocation[1] = SQL_FetchFloat(preparedStatement, p++);
+    rule.targetLocation[2] = SQL_FetchFloat(preparedStatement, p++);
     SQL_FetchString(preparedStatement, p++, rule.description, sizeof(rule.description));
 
     AddMapRuleToCache(rule);
@@ -116,7 +119,7 @@ void LoadMapRules(const char[] map = "") {
 void AddMapRule(MapRule rule) {
   static DBStatement addWithTpStatement = null;
   if (addWithTpStatement == null) {
-    if ((addWithTpStatement = SQL_PrepareQuery(db, "INSERT INTO mapRules (map, rangeMin, rangeMax, locationX, locationY, locationZ, action, tpLocX, tpLocY, tpLocZ, description) VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?)", error, ERROR_SIZE)) == INVALID_HANDLE) {
+    if ((addWithTpStatement = SQL_PrepareQuery(db, "INSERT INTO mapRules (map, rangeMin, rangeMax, locationX, locationY, locationZ, radius, activationTime, action, tpLocX, tpLocY, tpLocZ, description) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?)", error, ERROR_SIZE)) == INVALID_HANDLE) {
       LogSQLError("Failed to prepare statement to add map rule with tp to db");
       addWithTpStatement = null;
       return;
@@ -124,7 +127,7 @@ void AddMapRule(MapRule rule) {
   }
   static DBStatement addWithKillStatement = null;
   if (addWithKillStatement == null) {
-    if ((addWithKillStatement = SQL_PrepareQuery(db, "INSERT INTO mapRules (map, rangeMin, rangeMax, locationX, locationY, locationZ, action, description) VALUES (?, ?, ?, ?, ?, ?, 0, ?)", error, ERROR_SIZE)) == INVALID_HANDLE) {
+    if ((addWithKillStatement = SQL_PrepareQuery(db, "INSERT INTO mapRules (map, rangeMin, rangeMax, locationX, locationY, locationZ, radius, activationTime, action, description) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, ?)", error, ERROR_SIZE)) == INVALID_HANDLE) {
       LogSQLError("Failed to prepare statement to add map rule with kill to db");
       addWithKillStatement = null;
       return;
@@ -148,7 +151,7 @@ void AddMapRule(MapRule rule) {
       addStatement = addWithTpStatement;
     }
     default: {
-      ThrowError("unexpected action: %d", rule.action);
+      ThrowError("unexpected rule action: %d", rule.action);
     }
   }
 
@@ -156,14 +159,16 @@ void AddMapRule(MapRule rule) {
   SQL_BindParamString(addStatement, p++, rule.map, false);
   SQL_BindParamInt(addStatement, p++, rule.scoreRange.start);
   SQL_BindParamInt(addStatement, p++, rule.scoreRange.end);
-  SQL_BindParamFloat(addStatement, p++, rule.location[0]);
-  SQL_BindParamFloat(addStatement, p++, rule.location[1]);
-  SQL_BindParamFloat(addStatement, p++, rule.location[2]);
+  SQL_BindParamFloat(addStatement, p++, rule.center[0]);
+  SQL_BindParamFloat(addStatement, p++, rule.center[1]);
+  SQL_BindParamFloat(addStatement, p++, rule.center[2]);
+  SQL_BindParamFloat(addStatement, p++, rule.radius);
+  SQL_BindParamFloat(addStatement, p++, rule.activationTime);
   switch (rule.action) {
     case MapRuleAction_Tp: {
-      SQL_BindParamFloat(addStatement, p++, rule.teleportLocation[0]);
-      SQL_BindParamFloat(addStatement, p++, rule.teleportLocation[1]);
-      SQL_BindParamFloat(addStatement, p++, rule.teleportLocation[2]);
+      SQL_BindParamFloat(addStatement, p++, rule.targetLocation[0]);
+      SQL_BindParamFloat(addStatement, p++, rule.targetLocation[1]);
+      SQL_BindParamFloat(addStatement, p++, rule.targetLocation[2]);
     }
   }
   SQL_BindParamString(addStatement, p++, rule.description, false);
@@ -241,24 +246,25 @@ enum struct MapRule {
   int id;
   char map[MAX_MAP_NAME_SIZE];
   Range scoreRange;
-  float location[3];
+  float center[3];
+  float radius;
+  float activationTime;
   MapRuleAction action;
-  float teleportLocation[3];
+  float targetLocation[3];
   char description[MAX_DESCRIPTION_SIZE];
 
   bool appliesTo(int client) {
     float location[3];
     GetClientAbsOrigin(client, location);
-    float distSquared = GetDistanceSquared(location, this.location);
 
-    return distSquared <= MAP_RULE_RADIUS * MAP_RULE_RADIUS;
+    float dx = this.center[0] - location[0];
+    float dz = this.center[2] - location[2];
+
+    float distanceFromCenterSquared = dx * dx + dz * dz;
+    float yMin = this.center[1] - this.radius;
+    float yMax = this.center[1] + 2 * this.radius;
+    float y = location[1];
+
+    return distanceFromCenterSquared <= this.radius * this.radius && yMin <= y && y <= yMax;
   }
-}
-
-float GetDistanceSquared(const float locationA[3], const float locationB[3]) {
-  float x = locationA[0] - locationB[0];
-  float y = locationA[1] - locationB[1];
-  float z = locationA[2] - locationB[2];
-
-  return x * x + y * y + z * z;
 }

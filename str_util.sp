@@ -3,6 +3,8 @@
 #endif
 #define _STR_UTIL_H
 
+#include <string>
+
 enum _elemBufSize {
   EBS_int = 10,
 }
