@@ -119,7 +119,7 @@ void LoadMapRules(const char[] map = "") {
 void AddMapRule(MapRule rule) {
   static DBStatement addWithTpStatement = null;
   if (addWithTpStatement == null) {
-    if ((addWithTpStatement = SQL_PrepareQuery(db, "INSERT INTO mapRules (map, rangeMin, rangeMax, locationX, locationY, locationZ, radius, activationTime, action, tpLocX, tpLocY, tpLocZ, description) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?)", error, ERROR_SIZE)) == INVALID_HANDLE) {
+    if ((addWithTpStatement = SQL_PrepareQuery(db, "INSERT INTO mapRules (map, rangeMin, rangeMax, locationX, locationY, locationZ, radius, activationTime, action, tLocX, tLocY, tLocZ, description) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?)", error, ERROR_SIZE)) == INVALID_HANDLE) {
       LogSQLError("Failed to prepare statement to add map rule with tp to db");
       addWithTpStatement = null;
       return;
@@ -189,7 +189,7 @@ void AddMapRule(MapRule rule) {
   //add to active rules
   char currentMap[MAX_MAP_NAME_SIZE];
   GetCurrentMap(currentMap, sizeof(currentMap));
-  if (strcmp(rule.map, currentMap) == 0) {
+  if (streq(rule.map, currentMap)) {
     AddMapRuleToCache(rule);
   }
 }
@@ -258,12 +258,12 @@ enum struct MapRule {
     GetClientAbsOrigin(client, location);
 
     float dx = this.center[0] - location[0];
-    float dz = this.center[2] - location[2];
+    float dz = this.center[1] - location[1];
 
     float distanceFromCenterSquared = dx * dx + dz * dz;
-    float yMin = this.center[1] - this.radius;
-    float yMax = this.center[1] + 2 * this.radius;
-    float y = location[1];
+    float yMin = this.center[2] - this.radius;
+    float yMax = this.center[2] + 2 * this.radius;
+    float y = location[2];
 
     return distanceFromCenterSquared <= this.radius * this.radius && yMin <= y && y <= yMax;
   }

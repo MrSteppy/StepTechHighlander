@@ -339,9 +339,9 @@ void Command_MapRule0(int client, int args) {
       Requires two locations (can be set over !st_set) which will define a circle as area of the map rule. activationTime is the number of seconds a \
       client has to spend inside the area of the rule for it to get enforced.");
       ReplyToCommand(client, "Examples: ");
-      ReplyToCommand(client, "!map_rule add 0..2 a->b 5.0 kill \"Circle of death\" - Defines a map rule which is active as long as blue has captured \
+      ReplyToCommand(client, "!map_rule add 0..2 a->b 5.0 kill Circle_of_death - Defines a map rule which is active as long as blue has captured \
       between 0 and 2 control points this round, with a circular area from a to b which kills all bots which spend 5 seconds inside");
-      ReplyToCommand(client, "!map_rule add 3 a->b 3.0 tp c \"Gate 5\" - When blue has scored exactly three points, teleport all clients to location c after 3 seconds");
+      ReplyToCommand(client, "!map_rule add 3 a->b 3.0 tp c Gate_5 - When blue has scored exactly three points, teleport all clients to location c after 3 seconds");
       return;
     }
     
@@ -386,6 +386,7 @@ void Command_MapRule0(int client, int args) {
     }
 
     char locationRangeArg[2 * MAX_LOCATION_NAME_SIZE + 2];
+    GetCmdArg(argNum++, locationRangeArg, sizeof(locationRangeArg));
     int arrowIndex = IndexOf(locationRangeArg, "->");
     if (arrowIndex < 0) {
       ReplyToCommand(client, "Please provide a valid location range (eg.: loc1->loc2)");
@@ -405,20 +406,26 @@ void Command_MapRule0(int client, int args) {
       return;
     }
 
-    float location[3];
-    location[0] = (locA.location[0] + locB.location[0]) / 2; //calculate the center of the two points
-    location[1] = (locA.location[1] + locB.location[1]) / 2;
-    location[2] = (locA.location[2] + locB.location[2]) / 2;
+    float center[3];
+    center[0] = (locA.location[0] + locB.location[0]) / 2; //calculate the center of the two points
+    center[1] = (locA.location[1] + locB.location[1]) / 2;
+    center[2] = (locA.location[2] + locB.location[2]) / 2;
 
     float dx = locA.location[0] - locB.location[0];
-    float dz = locA.location[0] - locB.location[0];
-    float distance = SquareRoot(dx * dx + dz * dz);
+    float dz = locA.location[1] - locB.location[1];
+    LogMessage("dx: %f", dx);
+    LogMessage("dz: %f", dz);
+    float distanceSquared = dx * dx + dz * dz;
+    float distance = SquareRoot(distanceSquared);
 
     if (distance < 0.1) {
       ReplyToCommand(client, "Warning: locations are very close to each other. It is unlikely that this map rule will be useful");
     }
 
     float radius = distance / 2;
+    LogMessage("distanceSquared: %f", distanceSquared);
+    LogMessage("distance: %f", distance);
+    LogMessage("radius: %f", radius);
 
     //activation time
     if (args < argNum) {
@@ -474,7 +481,7 @@ void Command_MapRule0(int client, int args) {
 
     //description
     if (args < argNum) {
-      ReplyToCommand(client, "Missing argument: Description");
+      ReplyToCommand(client, "Missing argument: description");
       return;
     }
 
@@ -486,6 +493,7 @@ void Command_MapRule0(int client, int args) {
     GetCurrentMap(rule.map, sizeof(rule.map));
     GetClientAbsOrigin(client, rule.center);
     rule.scoreRange = scoreRange;
+    rule.center = center;
     rule.radius = radius;
     rule.activationTime = activationTime;
     rule.action = action;
@@ -814,6 +822,10 @@ enum struct ApplyingMapRule {
 
 Action Timer_MapRuleCheck(Handle handle) {
   static ApplyingMapRule appliyingRules[MAXPLAYERS];
+
+  if (activeMapRulesLen == 0) {
+    return Plugin_Continue;
+  }
   
   for (int client = 1; client <= MaxClients; client++) {
     if (!IsClientConnected(client)) {
@@ -878,8 +890,10 @@ Action Timer_MapRuleCheck(Handle handle) {
       panel.SetTitle("map rule debug info");
       char text[100];
       int drawn = 0;
+      int activeRuleId = 0;
       if (applyingRule.since > 0) {
-        Format(text, sizeof(text), "active: %d | %s", applyingRule.rule.id, applyingRule.rule.description);
+        activeRuleId = applyingRule.rule.id;
+        Format(text, sizeof(text), "active: %d | %s", activeRuleId, applyingRule.rule.description);
         panel.DrawText(text);
         panel.DrawText("---other rules---");
         drawn += 2;
@@ -892,14 +906,20 @@ Action Timer_MapRuleCheck(Handle handle) {
       }
       
       for (int i = 0; i < rulesInRangeLen && drawn < drawBound; i++) {
-        rule = rulesInRange[i];
+        MapRule r;
+        r = rulesInRange[i];
+
+        if (r.id == activeRuleId) {
+          continue;
+        }
+
         char activeAtScore[6];
-        if (rule.scoreRange.contains(blueRoundScore)) {
+        if (r.scoreRange.contains(blueRoundScore)) {
           activeAtScore = "true";
         } else {
           activeAtScore = "false";
         }
-        Format(text, sizeof(text), "%d | active at current score: %s | %d", rule.id, activeAtScore, rule.description);
+        Format(text, sizeof(text), "%d | active at current score: %s | %s", r.id, activeAtScore, r.description);
         panel.DrawText(text);
         drawn++;
       }
@@ -916,12 +936,14 @@ Action Timer_MapRuleCheck(Handle handle) {
     }
 
     //enforce rule if needed
-    if (applyingRule.since >= rule.activationTime) {
+    if (applyingRule.since > 0 && applyingRule.since * MAP_RULE_CHECK_TICK >= rule.activationTime) {
       bool enforced = false;
       switch (rule.action) {
         case MapRuleAction_Kill: {
           if (IsBot(client)) {
-            ClientCommand(client, "kill");
+            char botName[MAX_NAME_LENGTH];
+            GetClientName(client, botName, sizeof(botName));
+            ServerCommand("tf_bot_kill \"%s\"\n", botName);
             enforced = true;
           }
         }

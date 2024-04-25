@@ -46,17 +46,5 @@ void ToLowercase(char[] s) {
 }
 
 int IndexOf(const char[] string, const char[] pattern) {
-  for (int index = 0, patLen = strlen(pattern), bound = strlen(string) - patLen; index < bound; index++) {
-    bool match = true;
-    for (int i = 0; i < patLen; i++) {
-      if (string[index + i] != pattern[i]) {
-        match = false;
-        break;
-      }
-    }
-    if (match) {
-      return index;
-    }
-  }
-  return -1;
+  return StrContains(string, pattern);
 }
