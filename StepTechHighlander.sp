@@ -98,10 +98,9 @@ public void OnPluginStart() {
 
   //listener
   HookEvent("tournament_stateupdate", Event_ReadyUp);
-  HookEvent("player_changeclass", Event_PlayerChangeClass);
   HookEvent("teamplay_round_win", Event_TeamplayRoundWin);
-  HookEvent("player_team", Event_PlayerChangeTeam);
   HookEvent("teamplay_point_captured", Event_ControlPointCapped);
+  HookEvent("player_spawn", Event_PlayerSpawn);
 
   ServerCommand("exec namepool\n"); //reload namepool
 
@@ -1175,19 +1174,33 @@ void Event_ReadyUp(Event event, const char[] name, bool dontBroadcast) {
 void StartMatch(int client = 0) {
   cvarMpTournament.SetString("start");
   ServerCommand(RESTART_TOURNAMENT_CMD);
-  cvarMpRestartGame.IntValue = 1; //TODO test
+  cvarMpRestartGame.IntValue = 1;
   UpdateTeamComposition();
   Log4All(client, "Started the match (on difficulty %d)", cvarTfBotDifficulty.IntValue);
 }
 
-void Event_PlayerChangeClass(Event event, const char[] name, bool dontBroadcast) {
+enum struct Role {
+  int team;
+  int class;
+}
+
+void Event_PlayerSpawn(Event event, const char[] name, bool dontBroadcast) {
   int client = GetClientOfUserId(event.GetInt("userid"));
 
   if (IsBot(client)) return;
-  LogMessage("player class change detected");
 
-  //update team comp a bit later, since client is not always connected
-  CreateTimer(0.0, Timer_UpdateTeamComp);
+  Role role;
+  role.team = event.GetInt("team");
+  role.class = event.GetInt("class");
+
+  static Role lastRoles[MAXPLAYERS];
+  Role lastRole;
+  lastRole = lastRoles[client];
+
+  if (role.team != lastRole.team || role.class != lastRole.class) {
+    lastRoles[client] = role;
+    UpdateTeamComposition();
+  }
 }
 
 Action Timer_UpdateTeamComp(Handle handle) {
@@ -1200,15 +1213,6 @@ void Event_ControlPointCapped(Event event, const char[] name, bool dontBroadcast
 
   blueRoundScore++;
   LogMessage("Control point has been captured by team %d. Updated blueRoundScore: %d", teamIndex, blueRoundScore);
-}
-
-void Event_PlayerChangeTeam(Event event, const char[] name, bool dontBroadcast) {
-  int client = GetClientOfUserId(event.GetInt("userid"));
-
-  if (IsBot(client)) return;
-  LogMessage("player team change detected");
-
-  CreateTimer(0.0, Timer_UpdateTeamComp); //only update after the event
 }
 
 void Event_TeamplayRoundWin(Event event, const char[] name, bool dontBroadcast) {
