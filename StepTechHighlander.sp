@@ -125,6 +125,18 @@ public void OnClientConnected(int client) {
   }
 }
 
+public void OnClientDisconnect(int client) {
+  if (IsBot(client)) return;
+
+  if (GetPlayerCount() == 1) {
+    //last player to quit
+    StartLobbyMode(.clean = true);
+  } else {
+    //update team comp after client disconnected
+    CreateTimer(0.0, Timer_UpdateTeamComp);
+  }
+}
+
 public void OnMapStart() {
   blueRoundScore = 0;
 
@@ -827,7 +839,7 @@ Action Timer_MapRuleCheck(Handle handle) {
   }
   
   for (int client = 1; client <= MaxClients; client++) {
-    if (!IsClientConnected(client)) {
+    if (!IsClientInGame(client)) {
       continue;
     }
 

@@ -254,6 +254,10 @@ enum struct MapRule {
   char description[MAX_DESCRIPTION_SIZE];
 
   bool appliesTo(int client) {
+    if (!IsClientInGame(client)) {
+      return false;
+    }
+
     float location[3];
     GetClientAbsOrigin(client, location);
 
